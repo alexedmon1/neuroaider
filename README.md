@@ -50,6 +50,37 @@ cd neuroaider
 pip install -e .
 ```
 
+## Command-Line Interface (CLI)
+
+For command-line users, `neuroaider` provides a CLI to generate design files without writing Python code. This is especially useful for quick analyses or integration into shell scripts. The CLI is intended for use with FSL's `randomise`.
+
+**Basic Usage:**
+
+```bash
+neuroaider participants.csv \
+    --output-mat design.mat \
+    --output-con design.con \
+    --covariate age mean_center=True \
+    --categorical group coding=effect reference=control \
+    --contrast age_positive covariate age + \
+    --contrast patient_vs_control factor group patient
+```
+
+**Options:**
+
+- `participants_file`: Path to your CSV or TSV file.
+- `--output-mat`: Output path for the design matrix.
+- `--output-con`: Output path for the contrast matrix.
+- `--subject-column`: Name of the subject ID column (default: `participant_id`).
+- `--no-intercept`: Disable the intercept in the design matrix.
+- `--covariate`: Add a covariate (e.g., `age mean_center=True`).
+- `--categorical`: Add a categorical factor (e.g., `group coding=effect reference=control`).
+- `--contrast`: Add a contrast (e.g., `age_pos covariate age +`).
+- `--validate-by-dir`: Validate subjects against a derivatives directory.
+- `--output-names`: Save contrast names to a text file.
+- `--output-summary`: Save a design summary to a JSON file.
+- `-v, --verbose`: Increase output verbosity.
+
 ## Usage Examples
 
 ### VBM/TBSS Analysis
