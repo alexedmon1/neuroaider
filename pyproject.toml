@@ -35,6 +35,9 @@ dev = [
 Homepage = "https://github.com/alexedmon1/neuroaider"
 Repository = "https://github.com/alexedmon1/neuroaider"
 
+[project.scripts]
+neuroaider = "neuroaider.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

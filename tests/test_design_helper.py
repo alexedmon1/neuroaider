@@ -32,17 +32,17 @@ class TestDesignHelper:
     def test_init_with_dataframe(self, sample_participants):
         """Test initialization with DataFrame."""
         helper = DesignHelper(sample_participants, subject_column='participant_id')
-        assert len(helper.participants) == 6
+        assert len(helper.df) == 6
 
     def test_add_covariate(self, helper):
         """Test adding a covariate."""
         helper.add_covariate('age', mean_center=True)
-        assert 'age' in [c['name'] for c in helper._covariates]
+        assert 'age' in [c['name'] for c in helper.covariates]
 
     def test_add_categorical(self, helper):
         """Test adding a categorical variable."""
         helper.add_categorical('group', coding='effect')
-        assert 'group' in [f['name'] for f in helper._factors]
+        assert 'group' in [f['name'] for f in helper.factors]
 
     def test_build_design_matrix(self, helper):
         """Test building design matrix."""
@@ -58,13 +58,13 @@ class TestDesignHelper:
         helper.add_covariate('age', mean_center=True)
         helper.add_contrast('age_positive', covariate='age', direction='+')
 
-        assert len(helper._contrast_specs) == 1
-        assert helper._contrast_specs[0]['name'] == 'age_positive'
+        assert len(helper.contrasts) == 1
+        assert helper.contrasts[0]['name'] == 'age_positive'
 
     def test_binary_group_contrasts(self, helper):
         """Test binary group contrast generation."""
         helper = DesignHelper(
-            helper.participants,
+            helper.df,
             subject_column='participant_id',
             add_intercept=False
         )
@@ -72,7 +72,7 @@ class TestDesignHelper:
         helper.add_covariate('age', mean_center=True)
         helper.add_binary_group_contrasts('group')
 
-        assert len(helper._contrast_specs) == 2
+        assert len(helper.contrasts) == 2
 
     def test_save_files(self, helper, tmp_path):
         """Test saving design files."""
