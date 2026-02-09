@@ -78,6 +78,7 @@ class DesignHelper:
         self.add_intercept = add_intercept
         self.covariates: List[Dict] = []
         self.factors: List[Dict] = []
+        self.interactions: List[Dict] = []
         self.contrasts: List[Dict] = []
         self.design_matrix: Optional[np.ndarray] = None
         self.design_column_names: Optional[List[str]] = None
@@ -150,6 +151,46 @@ class DesignHelper:
         })
         logger.info(f"Added factor: {name} (coding={coding}, reference={reference})")
 
+    def add_interaction(self, var1: str, var2: str):
+        """
+        Add interaction term between two variables
+
+        Both variables must have been previously added via add_covariate() or
+        add_categorical(). The interaction columns are computed as element-wise
+        products of the constituent variable columns.
+
+        Args:
+            var1: Name of first variable (covariate or factor)
+            var2: Name of second variable (covariate or factor)
+
+        Examples:
+            helper.add_covariate('dose', mean_center=True)
+            helper.add_categorical('PND', coding='effect', reference='P30')
+            helper.add_interaction('dose', 'PND')
+            # Creates columns: dose×PND_P60, dose×PND_P90
+        """
+        cov_names = [c['name'] for c in self.covariates]
+        fac_names = [f['name'] for f in self.factors]
+        all_names = cov_names + fac_names
+
+        if var1 not in all_names:
+            raise ValueError(
+                f"Variable '{var1}' not found. "
+                f"Add it first with add_covariate() or add_categorical(). "
+                f"Available: {all_names}"
+            )
+        if var2 not in all_names:
+            raise ValueError(
+                f"Variable '{var2}' not found. "
+                f"Add it first with add_covariate() or add_categorical(). "
+                f"Available: {all_names}"
+            )
+        if var1 == var2:
+            raise ValueError("Cannot create interaction of a variable with itself")
+
+        self.interactions.append({'var1': var1, 'var2': var2})
+        logger.info(f"Added interaction: {var1} × {var2}")
+
     def add_contrast(
         self,
         name: str,
@@ -157,6 +198,7 @@ class DesignHelper:
         direction: Optional[str] = None,
         factor: Optional[str] = None,
         level: Optional[str] = None,
+        interaction: Optional[str] = None,
         vector: Optional[List[float]] = None
     ):
         """
@@ -168,6 +210,8 @@ class DesignHelper:
             direction: '+' for positive, '-' for negative effect
             factor: Test factor level (provide factor + level)
             level: Level to test against reference
+            interaction: Interaction column name (provide interaction + level + direction)
+                e.g. 'dose×PND' with level='P60' and direction='+'
             vector: Custom contrast vector (advanced users)
 
         Examples:
@@ -176,6 +220,10 @@ class DesignHelper:
 
             # Test group difference
             helper.add_contrast('patient_vs_control', factor='group', level='patient')
+
+            # Test interaction term
+            helper.add_contrast('dose_x_PND_P60', interaction='dose×PND',
+                              level='P60', direction='+')
 
             # Custom contrast
             helper.add_contrast('custom', vector=[0, 1, -1, 0])
@@ -188,6 +236,22 @@ class DesignHelper:
                 'vector': vector
             })
             logger.info(f"Added custom contrast: {name}")
+
+        elif interaction is not None:
+            # Interaction contrast
+            if direction not in ['+', '-']:
+                raise ValueError("Direction must be '+' or '-' for interaction contrasts")
+            if level is None:
+                raise ValueError("Must provide level for interaction contrast")
+
+            self.contrasts.append({
+                'name': name,
+                'type': 'interaction',
+                'interaction': interaction,
+                'level': level,
+                'direction': direction
+            })
+            logger.info(f"Added interaction contrast: {name} ({interaction}_{level} {direction})")
 
         elif covariate is not None:
             # Covariate contrast
@@ -217,6 +281,7 @@ class DesignHelper:
                 "Must provide either:\n"
                 "  - covariate + direction\n"
                 "  - factor + level\n"
+                "  - interaction + level + direction\n"
                 "  - vector (custom)"
             )
 
@@ -415,6 +480,55 @@ class DesignHelper:
                     columns.append(col)
                     column_names.append(f"{name}_{level}")
 
+        # Add interaction columns
+        for interaction in self.interactions:
+            var1 = interaction['var1']
+            var2 = interaction['var2']
+
+            cov_names = [c['name'] for c in self.covariates]
+            fac_names = [f['name'] for f in self.factors]
+
+            var1_is_cov = var1 in cov_names
+            var2_is_cov = var2 in cov_names
+
+            if var1_is_cov and var2_is_cov:
+                # Covariate × Covariate: single product column
+                idx1 = column_names.index(var1)
+                idx2 = column_names.index(var2)
+                columns.append(columns[idx1] * columns[idx2])
+                column_names.append(f"{var1}×{var2}")
+
+            elif var1_is_cov and not var2_is_cov:
+                # Covariate × Factor: one column per factor level column
+                cov_idx = column_names.index(var1)
+                for cn_idx, cn in enumerate(column_names):
+                    if cn.startswith(f"{var2}_"):
+                        level_suffix = cn[len(f"{var2}_"):]
+                        columns.append(columns[cov_idx] * columns[cn_idx])
+                        column_names.append(f"{var1}×{var2}_{level_suffix}")
+
+            elif not var1_is_cov and var2_is_cov:
+                # Factor × Covariate: one column per factor level column
+                cov_idx = column_names.index(var2)
+                for cn_idx, cn in enumerate(list(column_names)):
+                    if cn.startswith(f"{var1}_"):
+                        level_suffix = cn[len(f"{var1}_"):]
+                        columns.append(columns[cov_idx] * columns[cn_idx])
+                        column_names.append(f"{var1}_{level_suffix}×{var2}")
+
+            else:
+                # Factor × Factor: product of all column pairs
+                var1_cols = [(i, cn) for i, cn in enumerate(column_names)
+                             if cn.startswith(f"{var1}_")]
+                var2_cols = [(i, cn) for i, cn in enumerate(column_names)
+                             if cn.startswith(f"{var2}_")]
+                for i1, cn1 in var1_cols:
+                    l1 = cn1[len(f"{var1}_"):]
+                    for i2, cn2 in var2_cols:
+                        l2 = cn2[len(f"{var2}_"):]
+                        columns.append(columns[i1] * columns[i2])
+                        column_names.append(f"{var1}_{l1}×{var2}_{l2}")
+
         # Stack into matrix
         design_matrix = np.column_stack(columns)
 
@@ -485,6 +599,24 @@ class DesignHelper:
                 idx = self.design_column_names.index(col_name)
                 vector = [0] * n_predictors
                 vector[idx] = 1
+
+            elif ctype == 'interaction':
+                # Interaction contrast
+                interaction_name = contrast['interaction']
+                level = contrast['level']
+                direction = contrast['direction']
+
+                # Build expected column name: interaction_name + '_' + level
+                col_name = f"{interaction_name}_{level}"
+                if col_name not in self.design_column_names:
+                    raise ValueError(
+                        f"Interaction column '{col_name}' not found in design matrix. "
+                        f"Available columns: {self.design_column_names}"
+                    )
+
+                idx = self.design_column_names.index(col_name)
+                vector = [0] * n_predictors
+                vector[idx] = 1 if direction == '+' else -1
 
             contrast_vectors.append(vector)
             contrast_names.append(name)
@@ -610,6 +742,7 @@ class DesignHelper:
                 'contrasts': con_names,
                 'covariates': convert_to_native(self.covariates),
                 'factors': convert_to_native(self.factors),
+                'interactions': convert_to_native(self.interactions),
                 'validated': self.validated
             }
 
@@ -647,6 +780,12 @@ class DesignHelper:
                 lines.append(f"    Levels: {fac['levels']}")
                 if fac['reference']:
                     lines.append(f"    Reference: {fac['reference']}")
+            lines.append("")
+
+        if self.interactions:
+            lines.append("Interactions:")
+            for inter in self.interactions:
+                lines.append(f"  - {inter['var1']} × {inter['var2']}")
             lines.append("")
 
         if self.design_matrix is not None:

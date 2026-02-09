@@ -9,6 +9,7 @@ A standalone tool for creating design matrices and contrasts for neuroimaging st
 - **Automatic Contrast Generation**: Create common contrasts without manual vector specification
 - **Multiple Coding Schemes**: Effect (sum-to-zero), dummy, and one-hot coding for categorical variables
 - **FSL Compatible**: Generates `.mat` and `.con` files ready for FSL randomise, TBSS, etc.
+- **Interaction Terms**: Covariate×factor, covariate×covariate, and factor×factor interactions
 - **Type Safe**: Full validation and helpful error messages
 
 ## Quick Start
@@ -247,6 +248,7 @@ Main class for creating design matrices.
 **Methods:**
 - `add_covariate(name, mean_center=True, standardize=False)` - Add continuous variable
 - `add_categorical(name, coding='effect', reference=None)` - Add categorical variable
+- `add_interaction(var1, var2)` - Add interaction between two variables
 - `add_contrast(name, **kwargs)` - Add contrast to test
 - `validate(derivatives_dir=None, file_pattern=None, drop_missing=True)` - Validate subjects
 - `build_design_matrix()` - Build design matrix (called automatically by save())
@@ -306,6 +308,100 @@ Complete design specification (optional):
 }
 ```
 
+## Interaction Terms
+
+Add interaction terms between any two variables:
+
+```python
+helper = DesignHelper('participants.csv')
+helper.add_covariate('dose', mean_center=True)
+helper.add_categorical('PND', coding='effect', reference='P30')
+helper.add_categorical('sex', coding='effect', reference='F')
+
+# Add dose × PND interaction
+helper.add_interaction('dose', 'PND')
+
+# Build and inspect
+helper.build_design_matrix()
+print(helper.design_column_names)
+# ['Intercept', 'dose', 'PND_P60', 'PND_P90', 'sex_M', 'dose×PND_P60', 'dose×PND_P90']
+
+# Contrasts for interaction
+helper.add_contrast('int_P60_pos', interaction='dose×PND', level='P60', direction='+')
+helper.add_contrast('int_P90_neg', interaction='dose×PND', level='P90', direction='-')
+```
+
+**Supported interaction types:**
+- **Covariate × Factor**: One column per non-reference factor level (most common)
+- **Covariate × Covariate**: Single product column
+- **Factor × Factor**: Product of all non-reference level pairs
+
+## Study Design Examples
+
+### 1. Simple two-group comparison with covariate
+
+```python
+helper = DesignHelper('participants.csv')
+helper.add_covariate('age', mean_center=True)
+helper.add_categorical('group', coding='effect', reference='control')
+```
+
+**Design matrix:**
+```
+          Intercept  age    group_patient
+Subject1:    1.0    -5.2       1.0        (patient)
+Subject2:    1.0     3.1      -1.0        (control)
+Subject3:    1.0    -2.1       1.0        (patient)
+```
+
+**Contrasts:**
+- `age_positive`: `[0, 1, 0]`
+- `patient_vs_control`: `[0, 0, 1]`
+
+### 2. Dose-response with sex covariate (per-timepoint design)
+
+```python
+helper = DesignHelper('participants.csv')
+helper.add_covariate('dose', mean_center=True)       # 0, 1, 2, 3
+helper.add_categorical('sex', coding='effect', reference='F')
+```
+
+**Design matrix:**
+```
+          Intercept  dose   sex_M
+Subject1:    1.0    -1.5    1.0    (male, dose=0)
+Subject2:    1.0    -0.5   -1.0    (female, dose=1)
+Subject3:    1.0     0.5    1.0    (male, dose=2)
+Subject4:    1.0     1.5   -1.0    (female, dose=3)
+```
+
+**Contrasts:**
+- `dose_positive`: `[0, 1, 0]` — higher dose → higher metric
+- `dose_negative`: `[0, -1, 0]` — higher dose → lower metric
+
+### 3. Multi-factor with interaction (pooled across timepoints)
+
+```python
+helper = DesignHelper('participants.csv')
+helper.add_covariate('dose', mean_center=True)
+helper.add_categorical('PND', coding='effect', reference='P30')
+helper.add_categorical('sex', coding='effect', reference='F')
+helper.add_interaction('dose', 'PND')
+```
+
+**Design matrix:**
+```
+          Intercept  dose  PND_P60  PND_P90  sex_M  dose×PND_P60  dose×PND_P90
+Subject1:    1.0    -1.5    -1.0    -1.0     1.0       1.5           1.5      (P30, male)
+Subject2:    1.0     0.5     1.0    -1.0    -1.0       0.5          -0.5      (P60, female)
+Subject3:    1.0     1.5    -1.0     1.0     1.0      -1.5           1.5      (P90, male)
+```
+
+**Contrasts:**
+- `dose_positive`: `[0, 1, 0, 0, 0, 0, 0]` — main effect of dose
+- `interaction_P60_pos`: `[0, 0, 0, 0, 0, 1, 0]` — dose effect stronger at P60 vs P30
+- `interaction_P90_pos`: `[0, 0, 0, 0, 0, 0, 1]` — dose effect stronger at P90 vs P30
+
 ## Tips and Best Practices
 
 1. **Always mean-center continuous covariates** when including categorical variables or interactions
@@ -347,7 +443,6 @@ run_vbm_analysis(
 - CLI tool for interactive design creation
 - Visualization of design matrix (heatmap)
 - Support for SPM format export
-- Interaction terms
 - F-contrasts for multi-level factors
 - Design efficiency calculations
 
