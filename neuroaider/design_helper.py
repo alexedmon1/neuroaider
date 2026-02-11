@@ -7,6 +7,7 @@ from participant data files (CSV/TSV).
 
 import logging
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
 import pandas as pd
@@ -750,6 +751,197 @@ class DesignHelper:
             with open(summary_file, 'w') as f:
                 json.dump(summary, f, indent=2)
             logger.info(f"Saved summary: {summary_file}")
+
+    def write_description(self, output_path: Union[str, Path]) -> None:
+        """
+        Write a human-readable description of the statistical design.
+
+        Produces a text file documenting the sample, design matrix columns
+        (with coding explanations), and contrast definitions with their
+        resolved vectors.
+
+        Args:
+            output_path: Path to write the description file
+        """
+        # Ensure design and contrast matrices are built
+        if self.design_matrix is None:
+            self.build_design_matrix()
+        contrast_matrix, contrast_names = self.build_contrast_matrix()
+
+        lines = []
+
+        # Header
+        lines.append("DESIGN DESCRIPTION")
+        lines.append("==================")
+        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("")
+
+        # Sample section
+        lines.append("SAMPLE")
+        lines.append("------")
+        lines.append(f"N = {len(self.df)} subjects")
+
+        # Group breakdown from factor columns
+        factor_names = [f['name'] for f in self.factors]
+        if factor_names:
+            lines.append("")
+            lines.append("  Group breakdown:")
+            if len(factor_names) == 1:
+                counts = self.df[factor_names[0]].value_counts().sort_index()
+                for level, n in counts.items():
+                    lines.append(f"    {factor_names[0]}={level}: {n}")
+            else:
+                counts = self.df.groupby(factor_names).size()
+                for idx, n in counts.items():
+                    if isinstance(idx, tuple):
+                        label = ", ".join(
+                            f"{name}={val}"
+                            for name, val in zip(factor_names, idx)
+                        )
+                    else:
+                        label = f"{factor_names[0]}={idx}"
+                    lines.append(f"    {label}: {n}")
+
+        lines.append("")
+
+        # Design matrix section
+        n_obs, n_pred = self.design_matrix.shape
+        lines.append("DESIGN MATRIX")
+        lines.append("-------------")
+        lines.append(f"{n_obs} observations x {n_pred} predictors")
+        lines.append("")
+
+        for col_idx, col_name in enumerate(self.design_column_names):
+            desc = self._describe_column(col_name, col_idx)
+            lines.append(f"  Column {col_idx + 1}: {col_name} — {desc}")
+
+        # Reference levels
+        refs = [
+            (f['name'], f['reference'] or f['levels'][0])
+            for f in self.factors
+            if f['coding'] in ('effect', 'dummy')
+        ]
+        if refs:
+            lines.append("")
+            lines.append("  Reference levels:")
+            for name, ref in refs:
+                lines.append(f"    {name}: {ref}")
+
+        lines.append("")
+
+        # Contrasts section
+        lines.append("CONTRASTS")
+        lines.append("---------")
+        lines.append(f"{len(self.contrasts)} contrasts defined:")
+        lines.append("")
+
+        for i, (contrast, vector) in enumerate(
+            zip(self.contrasts, contrast_matrix)
+        ):
+            vec_str = "[" + ", ".join(f"{v:g}" for v in vector) + "]"
+            lines.append(f"  {i + 1}. {contrast['name']}: {vec_str}")
+            explanation = self._explain_contrast(contrast, vector)
+            lines.append(f"     Tests: {explanation}")
+            lines.append("")
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("\n".join(lines))
+        logger.info(f"Saved design description: {output_path}")
+
+    def _describe_column(self, col_name: str, col_idx: int) -> str:
+        """Return a human-readable description of a design matrix column."""
+        if col_name == "Intercept":
+            return "Constant term (1 for all subjects)"
+
+        # Check covariates
+        for cov in self.covariates:
+            if col_name == cov['name']:
+                parts = ["Continuous"]
+                if cov['standardize']:
+                    parts.append("(z-scored)")
+                elif cov['mean_center']:
+                    parts.append("(mean-centered)")
+                return " ".join(parts)
+
+        # Check factors
+        for factor in self.factors:
+            prefix = f"{factor['name']}_"
+            if col_name.startswith(prefix) and "×" not in col_name:
+                level = col_name[len(prefix):]
+                if level in [str(lv) for lv in factor['levels']]:
+                    ref = factor['reference'] or factor['levels'][0]
+                    if factor['coding'] == 'dummy':
+                        return (
+                            f"Dummy coding (ref={ref}). "
+                            f"1 if {factor['name']} is {level}, 0 otherwise."
+                        )
+                    elif factor['coding'] == 'effect':
+                        return (
+                            f"Effect coding (ref={ref}). "
+                            f"+1 if {factor['name']} is {level}, "
+                            f"-1 if {ref}."
+                        )
+                    elif factor['coding'] == 'one-hot':
+                        return f"One-hot. 1 if {factor['name']} is {level}, 0 otherwise."
+
+        # Check interactions
+        if "×" in col_name:
+            return f"Interaction term ({col_name.replace('×', ' x ')})"
+
+        return "Design column"
+
+    def _explain_contrast(self, contrast: dict, vector: np.ndarray) -> str:
+        """Return a human-readable explanation of what a contrast tests."""
+        ctype = contrast['type']
+
+        if ctype == 'covariate':
+            cov = contrast['covariate']
+            direction = "positive" if contrast['direction'] == '+' else "negative"
+            return f"{direction.capitalize()} effect of {cov}"
+
+        elif ctype == 'factor':
+            factor = contrast['factor']
+            level = contrast['level']
+            # Find reference
+            ref = None
+            for f in self.factors:
+                if f['name'] == factor:
+                    ref = f['reference'] or f['levels'][0]
+                    break
+            if f and f['coding'] == 'effect':
+                return f"{factor} {level} vs grand mean"
+            return f"{factor} {level} vs {ref}" if ref else f"{factor} {level}"
+
+        elif ctype == 'interaction':
+            return (
+                f"Interaction: {contrast['interaction']} at {contrast['level']} "
+                f"({'positive' if contrast['direction'] == '+' else 'negative'})"
+            )
+
+        elif ctype == 'custom':
+            # Describe based on non-zero elements
+            nonzero = [
+                (self.design_column_names[i], v)
+                for i, v in enumerate(vector) if v != 0
+            ]
+            if len(nonzero) == 1:
+                col, val = nonzero[0]
+                direction = "positive" if val > 0 else "negative"
+                return f"{direction.capitalize()} effect of {col}"
+            elif len(nonzero) == 2:
+                (col1, v1), (col2, v2) = nonzero
+                if v1 > 0 and v2 < 0:
+                    return f"{col1} > {col2}"
+                elif v1 < 0 and v2 > 0:
+                    return f"{col2} > {col1}"
+            # Fallback: list the weights
+            parts = []
+            for col, val in nonzero:
+                parts.append(f"{val:+g}*{col}")
+            return " ".join(parts)
+
+        return contrast['name']
 
     def summary(self) -> str:
         """
