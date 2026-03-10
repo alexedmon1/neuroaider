@@ -280,3 +280,197 @@ class TestInteractions:
             summary = json.load(f)
         assert len(summary['interactions']) == 1
         assert summary['interactions'][0]['var1'] == 'dose'
+
+
+class TestFTests:
+    """Test F-test specification support."""
+
+    @pytest.fixture
+    def dose_data(self):
+        """Create data with 4 dose groups for polynomial contrast testing."""
+        np.random.seed(42)
+        n_per_group = 5
+        return pd.DataFrame({
+            'participant_id': [f'sub-{i:02d}' for i in range(n_per_group * 4)],
+            'dose': ['C'] * n_per_group + ['L'] * n_per_group +
+                    ['M'] * n_per_group + ['H'] * n_per_group,
+            'sex': (['M', 'F'] * (n_per_group * 2))[:n_per_group * 4],
+        })
+
+    def test_add_ftest_by_name(self, dose_data):
+        """Test adding F-test referencing contrasts by name."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('C_vs_L', vector=[1, 0, -1, 0])
+        helper.add_contrast('C_vs_M', vector=[1, 0, 0, -1])
+        helper.add_contrast('C_vs_H', vector=[1, -1, 0, 0])
+
+        helper.add_ftest('omnibus', ['C_vs_L', 'C_vs_M', 'C_vs_H'])
+
+        assert len(helper.ftests) == 1
+        assert helper.ftests[0]['name'] == 'omnibus'
+
+    def test_add_ftest_by_index(self, dose_data):
+        """Test adding F-test referencing contrasts by 1-based index."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_contrast('c2', vector=[0, 0, 1, -1])
+
+        helper.add_ftest('both', [1, 2])
+
+        ftest_mat, ftest_names = helper.build_ftest_matrix()
+        assert ftest_mat.shape == (1, 2)
+        np.testing.assert_array_equal(ftest_mat[0], [1, 1])
+
+    def test_build_ftest_matrix(self, dose_data):
+        """Test that F-test matrix is correctly constructed."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        # 4 contrasts
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_contrast('c2', vector=[0, 1, -1, 0])
+        helper.add_contrast('c3', vector=[0, 0, 1, -1])
+        helper.add_contrast('c4', vector=[1, 0, 0, -1])
+
+        # F-test on first two
+        helper.add_ftest('partial', ['c1', 'c2'])
+        # F-test on last two
+        helper.add_ftest('other', [3, 4])
+
+        ftest_mat, ftest_names = helper.build_ftest_matrix()
+        assert ftest_mat.shape == (2, 4)
+        np.testing.assert_array_equal(ftest_mat[0], [1, 1, 0, 0])
+        np.testing.assert_array_equal(ftest_mat[1], [0, 0, 1, 1])
+        assert ftest_names == ['partial', 'other']
+
+    def test_ftest_invalid_name_raises(self, dose_data):
+        """Test that referencing a nonexistent contrast name raises."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_ftest('bad', ['nonexistent'])
+
+        with pytest.raises(ValueError, match="not found"):
+            helper.build_ftest_matrix()
+
+    def test_ftest_invalid_index_raises(self, dose_data):
+        """Test that out-of-range index raises."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_ftest('bad', [5])
+
+        with pytest.raises(ValueError, match="out of range"):
+            helper.build_ftest_matrix()
+
+    def test_ftest_empty_raises(self, dose_data):
+        """Test that empty contrast list raises."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        with pytest.raises(ValueError, match="at least one contrast"):
+            helper.add_ftest('empty', [])
+
+    def test_save_fts_file(self, dose_data, tmp_path):
+        """Test that save() writes .fts file when F-tests defined."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_contrast('c2', vector=[0, 1, -1, 0])
+        helper.add_contrast('c3', vector=[0, 0, 1, -1])
+
+        helper.add_ftest('omnibus', ['c1', 'c2', 'c3'])
+        helper.add_ftest('partial', ['c1', 'c2'])
+
+        mat_file = tmp_path / 'design.mat'
+        con_file = tmp_path / 'design.con'
+        fts_file = tmp_path / 'design.fts'
+
+        helper.save(mat_file, con_file, design_fts_file=fts_file)
+
+        assert fts_file.exists()
+        content = fts_file.read_text()
+        assert '/NumWaves 3' in content
+        assert '/NumContrasts 2' in content
+        assert '1 1 1' in content   # omnibus row
+        assert '1 1 0' in content   # partial row
+
+    def test_save_auto_fts_path(self, dose_data, tmp_path):
+        """Test that save() auto-generates .fts path from .con path."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_ftest('test', ['c1'])
+
+        mat_file = tmp_path / 'design.mat'
+        con_file = tmp_path / 'design.con'
+
+        helper.save(mat_file, con_file)
+
+        # Should auto-create design.fts
+        assert (tmp_path / 'design.fts').exists()
+
+    def test_no_fts_without_ftests(self, dose_data, tmp_path):
+        """Test that no .fts file is written when no F-tests defined."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+
+        mat_file = tmp_path / 'design.mat'
+        con_file = tmp_path / 'design.con'
+
+        helper.save(mat_file, con_file)
+
+        assert not (tmp_path / 'design.fts').exists()
+
+    def test_summary_includes_ftests(self, dose_data):
+        """Test that summary() includes F-test info."""
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_contrast('c2', vector=[0, 1, -1, 0])
+        helper.add_ftest('omnibus', ['c1', 'c2'])
+
+        summary = helper.summary()
+        assert 'F-tests (1)' in summary
+        assert 'omnibus' in summary
+
+    def test_save_summary_includes_ftests(self, dose_data, tmp_path):
+        """Test that JSON summary includes F-test info."""
+        import json
+
+        helper = DesignHelper(dose_data, add_intercept=False)
+        helper.add_categorical('dose', coding='dummy')
+        helper.build_design_matrix()
+
+        helper.add_contrast('c1', vector=[1, -1, 0, 0])
+        helper.add_ftest('test', ['c1'])
+
+        mat_file = tmp_path / 'design.mat'
+        con_file = tmp_path / 'design.con'
+        summary_file = tmp_path / 'summary.json'
+
+        helper.save(mat_file, con_file, summary_file=summary_file)
+
+        with open(summary_file) as f:
+            summary = json.load(f)
+
+        assert summary['n_ftests'] == 1
+        assert summary['ftests'][0]['name'] == 'test'

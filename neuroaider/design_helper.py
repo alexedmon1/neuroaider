@@ -81,6 +81,7 @@ class DesignHelper:
         self.factors: List[Dict] = []
         self.interactions: List[Dict] = []
         self.contrasts: List[Dict] = []
+        self.ftests: List[Dict] = []
         self.design_matrix: Optional[np.ndarray] = None
         self.design_column_names: Optional[List[str]] = None
         self.validated = False
@@ -384,6 +385,97 @@ class DesignHelper:
             f"'{neg_name}' ({col2_name} > {col1_name})"
         )
 
+    def add_ftest(
+        self,
+        name: str,
+        contrasts: List[Union[str, int]]
+    ):
+        """
+        Add an F-test that combines multiple t-contrasts.
+
+        Each F-test specifies which t-contrasts (from add_contrast()) to include.
+        The resulting F-test has degrees of freedom equal to the number of
+        included contrasts.
+
+        Args:
+            name: F-test name (for reporting)
+            contrasts: List of contrast names (str) or 1-based indices (int)
+                to include in this F-test
+
+        Examples:
+            # By name
+            helper.add_ftest('omnibus_dose', ['linear_pos', 'linear_neg',
+                                               'quadratic_pos', 'quadratic_neg'])
+
+            # By 1-based index (matching FSL convention)
+            helper.add_ftest('deviation_from_linearity', [3, 4, 5, 6])
+
+            # Mixed
+            helper.add_ftest('linear_only', ['linear_pos', 'linear_neg'])
+        """
+        if not contrasts:
+            raise ValueError("F-test must include at least one contrast")
+
+        self.ftests.append({
+            'name': name,
+            'contrasts': contrasts
+        })
+        logger.info(f"Added F-test: {name} ({len(contrasts)} contrasts)")
+
+    def build_ftest_matrix(self) -> Tuple[np.ndarray, List[str]]:
+        """
+        Build F-test specification matrix from added F-tests.
+
+        Returns:
+            Tuple of (ftest_matrix, ftest_names) where ftest_matrix has shape
+            (n_ftests, n_contrasts) with 1s indicating included contrasts.
+
+        Raises:
+            ValueError: If no F-tests defined or contrast references invalid
+        """
+        if not self.ftests:
+            raise ValueError("No F-tests defined. Use add_ftest() first.")
+
+        if not self.contrasts:
+            raise ValueError("No t-contrasts defined. F-tests require t-contrasts.")
+
+        contrast_names = [c['name'] for c in self.contrasts]
+        n_contrasts = len(contrast_names)
+        n_ftests = len(self.ftests)
+
+        ftest_matrix = np.zeros((n_ftests, n_contrasts), dtype=int)
+        ftest_names = []
+
+        for i, ftest in enumerate(self.ftests):
+            ftest_names.append(ftest['name'])
+
+            for ref in ftest['contrasts']:
+                if isinstance(ref, int):
+                    # 1-based index (FSL convention)
+                    if ref < 1 or ref > n_contrasts:
+                        raise ValueError(
+                            f"F-test '{ftest['name']}': contrast index {ref} "
+                            f"out of range (1-{n_contrasts})"
+                        )
+                    ftest_matrix[i, ref - 1] = 1
+                elif isinstance(ref, str):
+                    if ref not in contrast_names:
+                        raise ValueError(
+                            f"F-test '{ftest['name']}': contrast '{ref}' not found. "
+                            f"Available: {contrast_names}"
+                        )
+                    ftest_matrix[i, contrast_names.index(ref)] = 1
+                else:
+                    raise ValueError(
+                        f"F-test '{ftest['name']}': contrast reference must be "
+                        f"str or int, got {type(ref)}"
+                    )
+
+        logger.info(f"F-test matrix shape: {ftest_matrix.shape}")
+        logger.info(f"F-tests: {ftest_names}")
+
+        return ftest_matrix, ftest_names
+
     def build_design_matrix(self) -> Tuple[np.ndarray, List[str]]:
         """
         Build design matrix from added covariates and factors
@@ -672,15 +764,19 @@ class DesignHelper:
         self,
         design_mat_file: Union[str, Path],
         design_con_file: Union[str, Path],
+        design_fts_file: Optional[Union[str, Path]] = None,
         contrast_names_file: Optional[Union[str, Path]] = None,
         summary_file: Optional[Union[str, Path]] = None
     ):
         """
-        Save design matrix and contrasts to files
+        Save design matrix, contrasts, and optionally F-tests to files
 
         Args:
             design_mat_file: Output file for design matrix (.mat)
             design_con_file: Output file for contrasts (.con)
+            design_fts_file: Optional output file for F-tests (.fts).
+                Written automatically if F-tests have been added via add_ftest().
+                If None but F-tests exist, writes to same directory as design_con_file.
             contrast_names_file: Optional file for contrast names (.txt)
             summary_file: Optional JSON summary file (.json)
         """
@@ -709,6 +805,23 @@ class DesignHelper:
             f.write("/Matrix\n")
             np.savetxt(f, contrast_mat, fmt='%.6f')
         logger.info(f"Saved contrasts: {design_con_file}")
+
+        # Save F-test specification if F-tests defined
+        if self.ftests:
+            ftest_mat, ftest_names = self.build_ftest_matrix()
+
+            if design_fts_file is None:
+                # Default: same directory and stem as .con file
+                design_fts_file = Path(design_con_file).with_suffix('.fts')
+
+            design_fts_file = Path(design_fts_file)
+            with open(design_fts_file, 'w') as f:
+                f.write(f"/NumWaves {ftest_mat.shape[1]}\n")
+                f.write(f"/NumContrasts {ftest_mat.shape[0]}\n")
+                f.write("/Matrix\n")
+                for row in ftest_mat:
+                    f.write(' '.join(str(v) for v in row) + '\n')
+            logger.info(f"Saved F-tests: {design_fts_file}")
 
         # Save contrast names
         if contrast_names_file:
@@ -739,8 +852,13 @@ class DesignHelper:
                 'n_subjects': len(self.df),
                 'n_predictors': design_mat.shape[1],
                 'n_contrasts': len(con_names),
+                'n_ftests': len(self.ftests),
                 'columns': col_names,
                 'contrasts': con_names,
+                'ftests': convert_to_native([
+                    {'name': ft['name'], 'contrasts': ft['contrasts']}
+                    for ft in self.ftests
+                ]),
                 'covariates': convert_to_native(self.covariates),
                 'factors': convert_to_native(self.factors),
                 'interactions': convert_to_native(self.interactions),
@@ -843,6 +961,24 @@ class DesignHelper:
             explanation = self._explain_contrast(contrast, vector)
             lines.append(f"     Tests: {explanation}")
             lines.append("")
+
+        # F-tests section
+        if self.ftests:
+            lines.append("F-TESTS")
+            lines.append("-------")
+            lines.append(f"{len(self.ftests)} F-tests defined:")
+            lines.append("")
+
+            ftest_mat, ftest_names = self.build_ftest_matrix()
+            for i, (ftest, row) in enumerate(zip(self.ftests, ftest_mat)):
+                included_contrasts = [
+                    contrast_names[j] for j in range(len(row)) if row[j] == 1
+                ]
+                lines.append(f"  {i + 1}. {ftest['name']} ({len(included_contrasts)} df)")
+                lines.append(f"     Includes: {', '.join(included_contrasts)}")
+                vec_str = "[" + ", ".join(str(v) for v in row) + "]"
+                lines.append(f"     Vector: {vec_str}")
+                lines.append("")
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -987,8 +1123,21 @@ class DesignHelper:
 
         if self.contrasts:
             lines.append(f"Contrasts ({len(self.contrasts)}):")
-            for con in self.contrasts:
-                lines.append(f"  - {con['name']}")
+            for i, con in enumerate(self.contrasts):
+                lines.append(f"  {i+1}. {con['name']}")
+            lines.append("")
+
+        if self.ftests:
+            lines.append(f"F-tests ({len(self.ftests)}):")
+            contrast_names = [c['name'] for c in self.contrasts]
+            for ft in self.ftests:
+                included = []
+                for ref in ft['contrasts']:
+                    if isinstance(ref, int):
+                        included.append(contrast_names[ref - 1] if ref <= len(contrast_names) else f"#{ref}")
+                    else:
+                        included.append(ref)
+                lines.append(f"  - {ft['name']} [{', '.join(included)}]")
             lines.append("")
 
         lines.append(f"Validated: {self.validated}")

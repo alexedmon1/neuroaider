@@ -8,7 +8,8 @@ A standalone tool for creating design matrices and contrasts for neuroimaging st
 - **Subject Validation**: Verify subjects have corresponding imaging data before analysis
 - **Automatic Contrast Generation**: Create common contrasts without manual vector specification
 - **Multiple Coding Schemes**: Effect (sum-to-zero), dummy, and one-hot coding for categorical variables
-- **FSL Compatible**: Generates `.mat` and `.con` files ready for FSL randomise, TBSS, etc.
+- **FSL Compatible**: Generates `.mat`, `.con`, and `.fts` files ready for FSL randomise, TBSS, etc.
+- **F-tests**: Combine multiple t-contrasts into F-tests for omnibus and multi-df hypothesis testing
 - **Interaction Terms**: Covariate×factor, covariate×covariate, and factor×factor interactions
 - **Type Safe**: Full validation and helpful error messages
 
@@ -250,11 +251,14 @@ Main class for creating design matrices.
 - `add_categorical(name, coding='effect', reference=None)` - Add categorical variable
 - `add_interaction(var1, var2)` - Add interaction between two variables
 - `add_contrast(name, **kwargs)` - Add contrast to test
+- `add_ftest(name, contrasts)` - Add F-test combining multiple t-contrasts (by name or 1-based index)
 - `validate(derivatives_dir=None, file_pattern=None, drop_missing=True)` - Validate subjects
 - `build_design_matrix()` - Build design matrix (called automatically by save())
 - `build_contrast_matrix()` - Build contrast matrix (called automatically by save())
-- `save(design_mat, design_con, contrast_names=None, summary=None)` - Save files
+- `build_ftest_matrix()` - Build F-test specification matrix
+- `save(design_mat, design_con, design_fts=None, contrast_names=None, summary=None)` - Save files (`.fts` auto-written when F-tests defined)
 - `summary()` - Print design summary
+- `write_description(output_path)` - Write human-readable design description
 
 ### `SubjectValidator`
 
@@ -294,6 +298,16 @@ age_negative
 patient_vs_control
 ```
 
+### design.fts
+
+FSL-format F-test specification (only written when F-tests are defined):
+```
+/NumWaves 3
+/NumContrasts 1
+/Matrix
+1 1 1
+```
+
 ### design_summary.json
 
 Complete design specification (optional):
@@ -302,8 +316,10 @@ Complete design specification (optional):
   "n_subjects": 23,
   "n_predictors": 4,
   "n_contrasts": 3,
+  "n_ftests": 1,
   "columns": ["Intercept", "age", "sex_1", "group_1"],
   "contrasts": ["age_positive", "age_negative", "patient_vs_control"],
+  "ftests": [{"name": "omnibus", "contrasts": ["age_positive", "age_negative"]}],
   ...
 }
 ```
@@ -335,6 +351,89 @@ helper.add_contrast('int_P90_neg', interaction='dose×PND', level='P90', directi
 - **Covariate × Factor**: One column per non-reference factor level (most common)
 - **Covariate × Covariate**: Single product column
 - **Factor × Factor**: Product of all non-reference level pairs
+
+## F-tests
+
+F-tests combine multiple t-contrasts into a single multi-df test. This is essential for:
+- **Omnibus tests**: Does dose have *any* effect? (testing linear + quadratic + cubic simultaneously)
+- **Deviation-from-linearity**: Is the dose-response non-monotonic? (testing quadratic + cubic)
+- **Multi-level factor effects**: Does group differ across any contrast?
+
+### Basic F-test
+
+```python
+helper = DesignHelper('participants.csv')
+helper.add_covariate('age', mean_center=True)
+helper.add_categorical('group', coding='effect', reference='control')
+
+helper.add_contrast('age_pos', covariate='age', direction='+')
+helper.add_contrast('age_neg', covariate='age', direction='-')
+helper.add_contrast('group_effect', factor='group', level='patient')
+
+# F-test combining age contrasts
+helper.add_ftest('age_omnibus', ['age_pos', 'age_neg'])
+
+# Save — automatically writes design.fts alongside .mat and .con
+helper.save('design.mat', 'design.con')
+```
+
+### Polynomial Dose-Response with F-tests
+
+A common use case is testing for non-monotonic dose-response relationships using orthogonal polynomial contrasts:
+
+```python
+helper = DesignHelper(data, add_intercept=False)
+helper.add_categorical('dose', coding='dummy')  # levels: C, H, L, M
+helper.build_design_matrix()
+
+# Orthogonal polynomial contrasts (computed from actual dose values)
+helper.add_contrast('linear_pos', vector=[...])
+helper.add_contrast('linear_neg', vector=[...])
+helper.add_contrast('quadratic_pos', vector=[...])
+helper.add_contrast('quadratic_neg', vector=[...])
+helper.add_contrast('cubic_pos', vector=[...])
+helper.add_contrast('cubic_neg', vector=[...])
+
+# F-tests for different hypotheses
+helper.add_ftest('omnibus_dose',
+    ['linear_pos', 'linear_neg', 'quadratic_pos', 'quadratic_neg',
+     'cubic_pos', 'cubic_neg'])                    # Any dose effect (3 df)
+
+helper.add_ftest('deviation_from_linearity',
+    ['quadratic_pos', 'quadratic_neg',
+     'cubic_pos', 'cubic_neg'])                    # Non-monotonic response (2 df)
+
+helper.add_ftest('linear_only',
+    ['linear_pos', 'linear_neg'])                  # Pure linear trend (1 df)
+
+helper.save('design.mat', 'design.con')  # writes design.fts automatically
+```
+
+### Referencing Contrasts by Index
+
+F-tests can reference contrasts by name (str) or by 1-based index (int), matching FSL convention:
+
+```python
+# By 1-based index
+helper.add_ftest('first_two', [1, 2])
+
+# Mixed
+helper.add_ftest('mixed', ['linear_pos', 4, 5, 'cubic_neg'])
+```
+
+### Output: design.fts
+
+The `.fts` file is a binary inclusion matrix (n_ftests × n_contrasts):
+```
+/NumWaves 6
+/NumContrasts 3
+/Matrix
+1 1 1 1 1 1
+0 0 1 1 1 1
+1 1 0 0 0 0
+```
+
+Each row is an F-test; each column corresponds to a t-contrast in the `.con` file. A `1` includes that contrast in the F-test.
 
 ## Study Design Examples
 
@@ -443,7 +542,6 @@ run_vbm_analysis(
 - CLI tool for interactive design creation
 - Visualization of design matrix (heatmap)
 - Support for SPM format export
-- F-contrasts for multi-level factors
 - Design efficiency calculations
 
 ## License
